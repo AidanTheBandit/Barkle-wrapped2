@@ -1,5 +1,4 @@
-import tweepy
-import twitter_credentials
+from misskey import Misskey
 import json
 import queue
 import time
@@ -9,11 +8,7 @@ from threading import Thread
 import generate_image
 
 # Auth credentials
-bearer_token = twitter_credentials.bearer_token
-consumer_key = twitter_credentials.consumer_key
-consumer_secret = twitter_credentials.consumer_secret
-access_token = twitter_credentials.access_token
-access_token_secret = twitter_credentials.access_token_secret
+mk = Misskey("barkle.chat", i="API-KEY")
 
 # Queue
 #userQueue = queue.Queue()
