@@ -168,19 +168,19 @@ def generate_highest_metrics_image(username, most_likes, most_retweets, most_quo
 
     # Content
     if most_likes > 1000:
-        popularity_txt = "You're Popular!"
-    elif most_likes > 500:
+        popularity_txt = "You're so Popular!"
+    elif most_likes > 15:
         popularity_txt = "You're Growing!"
-    elif most_likes > 100:
+    elif most_likes > 5:
         popularity_txt  = "You're Doing OK!"
-    elif most_likes > 10:
+    elif most_likes > 1:
         popularity_txt = "You're Doing Meh."
     else:
         popularity_txt = "You're not popular :("
     
     title_text = [username + ",", popularity_txt]
 
-    metrics_text = ["Most Likes", "Most Retweets", "Most Quotes"]
+    metrics_text = ["Most Stars", "Most Renotes", "Most Quotes"]
     metrics_values = [str(most_likes), str(most_retweets), str(most_quotes)]
 
     # Draw title
@@ -279,7 +279,7 @@ def generate_word_cloud_image(username):
     spacer = global_text_pos["spacer"]
 
     # Content
-    title_text = ["What you're Tweeting."]
+    title_text = ["What you're Barking."]
     #title_text = [username + ",", "Tweets Visualized."]
 
     # Draw title
@@ -314,13 +314,13 @@ def generate_likes_performance_image(username, likes_performance):
     y_pos = global_text_pos["y"]
     spacer = global_text_pos["spacer"]
 
-    lp_title_text = ["Get Any Big Tweets?"]  # LP = 'likes performance'
+    lp_title_text = ["Get Any Big Barks?"]  # LP = 'likes performance'
 
-    lp_text = ["> 100 likes.", "> 500 likes.",
-               "> 1,000 likes.", "> 10,000 likes."]
+    lp_text = ["> 1 likes.", "> 5 likes.",
+               "> 15 likes.", "> 10,000 likes."]
     lp_values = [str(likes_performance[100]), str(likes_performance[500]), str(
         likes_performance[1000]), str(likes_performance[10000])]
-    lp_values_additional_text = ["tweets"]
+    lp_values_additional_text = ["barks"]
 
     # Likes Performance section
     # Right align
@@ -442,7 +442,7 @@ def generate_sentiment_analysis_image(username, sentiment):
     sentiment_title = ["How were you feeling?", "Happy or Sad?"]
 
     # Sentiment text
-    sentiment_text = ["Emotionally  your  tweets", "scored", str(
+    sentiment_text = ["Emotionally  your  barks", "scored", str(
         sentiment), "meaning  you", "were...", sentiment_class]
 
     # Move base-level y-pos down
@@ -577,10 +577,10 @@ def main(username):
 
         # How many tweets with more than X likes
         likes_performance = {
-            100: len(df[df['like_count'] > 100]),
+            100: len(df[df['like_count'] > 1]),
             # 500 likes metric only used in 4 image format
-            500: len(df[df['like_count'] > 500]),
-            1000: len(df[df['like_count'] > 1000]),
+            500: len(df[df['like_count'] > 5]),
+            1000: len(df[df['like_count'] > 15]),
             10000: len(df[df['like_count'] > 10000])
         }
 
