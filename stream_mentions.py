@@ -118,7 +118,7 @@ def followStream():
     try:
         twitter_stream = streamListener(
             consumer_key, consumer_secret, access_token, access_token_secret)
-        twitter_stream.filter(track=['Make @TweetWrapped'])
+        twitter_stream.filter(track=['Make @Wrapped'])
     except Exception as e:
         print("FOLLOW STREAM ERROR: " + e)
 
