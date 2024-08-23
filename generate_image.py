@@ -1,124 +1,44 @@
+import requests
+import json
+import time
+from threading import Thread
 from PIL import Image, ImageFont, ImageDraw
 from wordcloud import WordCloud, STOPWORDS
-from textblob import TextBlob  # sentiment analysis
-import tweepy, twitter_credentials
-import textwrap # not used currently, implement in future
-import re, os # regex / saving and loading tweets
-import numpy as np  # numerical python library
-import pandas as pd  # store content into dataframes
-import sys  # running python file with args, remove later
+from textblob import TextBlob
+import numpy as np
+import pandas as pd
+import os
+import io
+from datetime import datetime, timedelta
+import re
+from collections import Counter
+import websocket
+import logging
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Twitter API Client
-def getClient():
-    client = tweepy.Client(bearer_token=twitter_credentials.bearer_token,
-                           consumer_key=twitter_credentials.consumer_key,
-                           consumer_secret=twitter_credentials.consumer_secret,
-                           access_token=None, access_token_secret=None)
-    return client
+# Barkle API endpoint
+BARKLE_API_URL = "https://barkle.chat/api"
+BARKLE_WS_URL = "wss://barkle.chat/streaming"
 
+# Your Barkle API token
+BARKLE_TOKEN = "your_barkle_token_here"
 
-# Return user information
-def getUserInfo(user):
-    client = getClient()
-    user = client.get_user(username=user)
-    return user.data
+# Headers for API requests
+headers = {
+    "Authorization": f"Bearer {BARKLE_TOKEN}"
+}
 
+# Bot username (for mention filtering)
+BOT_USERNAME = "your_bot_username_here"
 
-# Return recent tweets of user
-def getUserRecentTweets(id):
-    client = getClient()
-    user_tweets = client.get_users_tweets(id=id,
-                                          tweet_fields=['public_metrics,created_at'],
-                                          exclude=['retweets', 'replies'],
-                                          max_results=100,
-                                          #start_time = '2021-09-02T00:00:00.000Z'
-                                          )
+# Global variables for styling
+BACKGROUND_COLOR = (80, 54, 89)  # Purple background
+TEXT_COLOR = (228, 179, 143)  # Light peach for main text
+HIGHLIGHT_COLOR = (192, 222, 106)  # Light green for highlighted numbers
 
-    return user_tweets
-
-
-# Store recent user tweets in file
-def storeUserTweets(username, user_tweets):
-
-    file_path = 'user_tweets/' + username + '.txt'
-
-    # user has tweets
-    if user_tweets.data is not None and len(user_tweets.data) > 0:
-
-        # user tweets not stored in file
-        if not os.path.exists(file_path):
-
-            # create new file
-            file = open(file_path, 'w', encoding='utf-8')
-
-            # write each tweet into new file
-            for x in user_tweets.data:
-                file.write(cleanTweet(str(x)) + '\n')
-
-            file.close()
-            return True
-
-        else:
-            # return as error in future
-            # print("User tweets file already exists")
-            return False
-
-    else:
-        # user has no tweets
-        # print("No tweets")
-        return False
-
-
-# Remove special characters and hyperlinks
-# Modified code from freeCodeCamp.org
-def cleanTweet(tweet):
-
-    # replace ’ with '
-    tweet = tweet.replace('’', '\'')
-
-    return ' '.join(re.sub("(@[A-Za-z0-9]+)|([^0-9A-Za-z' \t])|(\w+:\/\/\S+)", " ", tweet).split())
-
-
-# Add public metrics to dataframe
-def tweetsToDataFrame(tweets):
-
-    # Create new dataframe with tweet text
-    df = pd.DataFrame(
-        data=[tweet.text for tweet in tweets], columns=['tweets'])
-
-    # Create columns for metrics
-    df['retweet_count'] = np.array(
-        [tweet.public_metrics.get('retweet_count') for tweet in tweets])
-    df['reply_count'] = np.array(
-        [tweet.public_metrics.get('reply_count') for tweet in tweets])
-    df['like_count'] = np.array(
-        [tweet.public_metrics.get('like_count') for tweet in tweets])
-    df['quote_count'] = np.array(
-        [tweet.public_metrics.get('quote_count') for tweet in tweets])
-    df['created_at'] = np.array([tweet.created_at for tweet in tweets])
-
-    return df
-
-
-# Sentiment analysis, returns
-# -1 for negative
-# 0 for neutral
-# 1 for positive
-def analyse_sentiment(tweet):
-    analysis = TextBlob(cleanTweet(tweet))
-
-    if analysis.sentiment.polarity > 0:
-        return 1
-    elif analysis.sentiment.polarity == 0:
-        return 0
-    else:
-        return -1
-
-# Watermark text
-tweet_wrapped_watermark = ["@TweetWrapped"]
-
-# Fonts used in images
 global_font = {
     "title": ImageFont.truetype("fonts/theboldfont.ttf", 70),
     "text": ImageFont.truetype("fonts/coolvetica-rg.otf", 60),
@@ -126,489 +46,353 @@ global_font = {
     "watermark": ImageFont.truetype("fonts/theboldfont.ttf", 40)
 }
 
-# Font colours
 global_font_colour = {
-    "title": (228, 179, 143),
+    "title": TEXT_COLOR,
     "text": (179, 145, 143),
-    "number": (192, 222, 106),
-    "watermark": (228, 179, 143)
+    "number": HIGHLIGHT_COLOR,
+    "watermark": TEXT_COLOR
 }
 
-# Text position and spacing
-# global_text_pos = {
-#     "x": 50,
-#     "y": 50,
-#     "spacer": 50
-# }
-
-# Larger text position and spacing
 global_text_pos = {
     "x": 100,
     "y": 100,
     "spacer": 100
 }
 
+# Watermark text
+barkle_wrapped_watermark = ["@BarkleWrapped"]
 
-# Generate image 1
-def generate_highest_metrics_image(username, most_likes, most_retweets, most_quotes):
+# Get user information
+def getUserInfo(username):
+    endpoint = f"{BARKLE_API_URL}/users/show"
+    data = {
+        "username": username
+    }
+    response = requests.post(endpoint, headers=headers, json=data)
+    return response.json()
 
-    # Open black image
-    img = Image.open("img/templates/purple_1000x1000.png")
+# Get all user's barks for the current year
+def getUserYearlyBarks(user_id):
+    endpoint = f"{BARKLE_API_URL}/users/notes"
+    all_barks = []
+    
+    current_year = datetime.now().year
+    start_date = datetime(current_year, 1, 1).isoformat() + "Z"
+    
+    until_id = None
+    while True:
+        data = {
+            "userId": user_id,
+            "limit": 100,
+            "sinceDate": start_date
+        }
+        if until_id:
+            data["untilId"] = until_id
+        
+        response = requests.post(endpoint, headers=headers, json=data)
+        barks = response.json()
+        
+        if not barks:
+            break
+        
+        all_barks.extend(barks)
+        until_id = barks[-1]["id"]
+        
+        if datetime.fromisoformat(barks[-1]["createdAt"].replace("Z", "")).year < current_year:
+            break
+        
+        time.sleep(1)
+    
+    return all_barks
+
+# Store user barks in file
+def storeUserBarks(username, user_barks):
+    file_path = f'user_barks/{username}_yearly.txt'
+
+    if user_barks and len(user_barks) > 0:
+        with open(file_path, 'w', encoding='utf-8') as file:
+            for bark in user_barks:
+                file.write(cleanBark(bark['text']) + '\n')
+        return True
+    else:
+        return False
+
+# Clean bark text
+def cleanBark(bark):
+    bark = re.sub(r'http\S+', '', bark)
+    bark = re.sub(r'@\w+', '', bark)
+    bark = re.sub(r'#\w+', '', bark)
+    bark = re.sub(r'[^a-zA-Z\s]', '', bark)
+    return bark.lower().strip()
+
+# Convert barks to DataFrame
+def barksToDataFrame(barks):
+    df = pd.DataFrame(barks)
+    df['reactionCount'] = df['reactions'].apply(lambda x: sum(x.values()) if x else 0)
+    df['created_at'] = pd.to_datetime(df['createdAt'])
+    return df
+
+# Sentiment analysis
+def analyse_sentiment(text):
+    analysis = TextBlob(cleanBark(text))
+    return analysis.sentiment.polarity
+
+# Generate image 1: Highest metrics
+def generate_highest_metrics_image(username, most_reactions, most_rebarks, most_replies):
+    img = Image.new('RGB', (1000, 1000), color=BACKGROUND_COLOR)
     draw = ImageDraw.Draw(img)
-
-    # Template size
-    image_width, image_height = img.size
 
     font = global_font
     font_colour = global_font_colour
+    x_pos, y_pos, spacer = global_text_pos.values()
 
-    x_pos = global_text_pos["x"]
-    y_pos = global_text_pos["y"]
-    spacer = global_text_pos["spacer"]
-
-    # Content
-    if most_likes > 1000:
-        popularity_txt = "You're so Popular!"
-    elif most_likes > 15:
+    if most_reactions > 1000:
+        popularity_txt = "You're Popular!"
+    elif most_reactions > 500:
         popularity_txt = "You're Growing!"
-    elif most_likes > 5:
-        popularity_txt  = "You're Doing OK!"
-    elif most_likes > 1:
+    elif most_reactions > 100:
+        popularity_txt = "You're Doing OK!"
+    elif most_reactions > 10:
         popularity_txt = "You're Doing Meh."
     else:
         popularity_txt = "You're not popular :("
     
-    title_text = [username + ",", popularity_txt]
+    title_text = [f"{username},", popularity_txt]
+    metrics_text = ["Most Reactions", "Most Rebarks", "Most Replies"]
+    metrics_values = [str(most_reactions), str(most_rebarks), str(most_replies)]
 
-    metrics_text = ["Most Stars", "Most Renotes", "Most Quotes"]
-    metrics_values = [str(most_likes), str(most_retweets), str(most_quotes)]
+    draw.text((x_pos, y_pos), title_text[0], font_colour["title"], font=font["title"])
+    draw.text((x_pos, y_pos + spacer*1.1), title_text[1], font_colour["title"], font=font["title"])
 
-    # Draw title
-    draw.text((x_pos, y_pos), title_text[0],
-              font_colour["title"], font=font["title"])
-    draw.text((x_pos, y_pos + spacer*1.1),
-              title_text[1], font_colour["title"], font=font["title"])
+    for i, (text, value) in enumerate(zip(metrics_text, metrics_values)):
+        draw.text((x_pos, y_pos + spacer*(3 + i*1.5)), text, font_colour["text"], font=font["text"])
+        num_width = font["number"].getsize(value)[0]
+        draw.text((1000 - x_pos - num_width, y_pos + spacer*(3 + i*1.5)), value, font_colour["number"], font=font["number"])
 
-    # Draw metric text
-    draw.text((x_pos, y_pos + spacer*3),
-              metrics_text[0], font_colour["text"], font=font["text"])
-    draw.text((x_pos, y_pos + spacer*4.5),
-              metrics_text[1], font_colour["text"], font=font["text"])
-    draw.text((x_pos, y_pos + spacer*6),
-              metrics_text[2], font_colour["text"], font=font["text"])
+    draw.text((650, 940), barkle_wrapped_watermark[0], font_colour["watermark"], font=font["watermark"])
 
-    # Width to right align
-    num_width_0 = font["number"].getsize(metrics_values[0])[0]
-    num_width_1 = font["number"].getsize(metrics_values[1])[0]
-    num_width_2 = font["number"].getsize(metrics_values[2])[0]
+    return img
 
-    # Draw metric values
-    temp_x_pos = image_width - x_pos - num_width_0
-    draw.text((temp_x_pos, y_pos + spacer*3),
-              metrics_values[0], font_colour["number"], font=font["number"])
+# Generate image 2: Word cloud
+def generate_word_cloud_image(username, text):
+    mask = np.array(Image.open('img/masks/barkle_logo_1000x1000.png'))
+    stopwords = set(STOPWORDS)
+    stopwords.add('gt')
 
-    temp_x_pos = image_width - x_pos - num_width_1
-    draw.text((temp_x_pos, y_pos + spacer*4.5),
-              metrics_values[1], font_colour["number"], font=font["number"])
-
-    temp_x_pos = image_width - x_pos - num_width_2
-    draw.text((temp_x_pos, y_pos + spacer*6),
-              metrics_values[2], font_colour["number"], font=font["number"])
-
-    # Draw watermark
-    draw.text((image_width - 350, image_height - 60),
-              tweet_wrapped_watermark[0], font_colour["title"], font=font["watermark"])
-
-    # Save image
-    img.save("img/outputs/highest_metrics/" +
-             username + ".png")
-    #print("Created highest metrics image.")
-
-
-# Generate image 2
-def generate_word_cloud_image(username):
-
-    # Get user data
-    text = open('user_tweets\\' + username + '.txt',
-                'r', encoding='utf-8').read()
-
-    # Stop words, add 'gt' to it
-    stopwords = STOPWORDS.add('gt')
-
-    # Mask
-    custom_mask = np.array(Image.open(
-        'img\\masks\\twitter_logo_1000x1000.png'))
-    font = 'fonts\\SFProDisplay-Light.ttf'
-
-    # WordCloud attributes
-    wordCloud = WordCloud(
-        width=1000, height=1000,
-        font_path=font,
-        mask=custom_mask,
+    wordcloud = WordCloud(
+        width=900, height=900,
+        background_color=None,
+        mode="RGBA",
+        mask=mask,
         stopwords=stopwords,
-        background_color=(80, 54, 89),
-        color_func=lambda *args, **kwargs: (199, 219, 115),  # text colour
-        include_numbers=False
-        # margin = 10, background_color = None, mode = 'RGBA',
-    )
+        font_path='fonts/SFProDisplay-Light.ttf',
+        color_func=lambda *args, **kwargs: (199, 219, 115)
+    ).generate(text)
 
-    # Generate
-    wordCloud.generate(text)
+    img = Image.new('RGB', (1000, 1000), color=BACKGROUND_COLOR)
+    cloud_image = wordcloud.to_image()
+    img.paste(cloud_image, (50, 50), cloud_image)
 
-    # Use colour of mask image
-    ## image_colours = ImageColorGenerator(custom_mask)
-    ## wordCloud.recolor(color_func = image_colours)
-
-    # Store to file
-    wordCloud.to_file(
-        'img\\outputs\\word_clouds\\' + username + '.png')
-
-    # Open pre-gen word cloud
-    img = Image.open(
-        "img/outputs/word_clouds/" + username + ".png")
     draw = ImageDraw.Draw(img)
+    draw.text((75, 75), "WHAT YOU'RE BARKING.", global_font_colour["title"], font=global_font["title"])
+    draw.text((650, 940), barkle_wrapped_watermark[0], global_font_colour["watermark"], font=global_font["watermark"])
 
-    # Template size
-    image_width, image_height = img.size
+    return img
+
+# Generate image 3: Reaction performance
+def generate_reaction_performance_image(username, reaction_performance):
+    img = Image.new('RGB', (1000, 1000), color=BACKGROUND_COLOR)
+    draw = ImageDraw.Draw(img)
 
     font = global_font
     font_colour = global_font_colour
+    x_pos, y_pos, spacer = global_text_pos.values()
 
-    x_pos = global_text_pos["x"]
-    y_pos = global_text_pos["y"]
-    spacer = global_text_pos["spacer"]
+    draw.text((x_pos, y_pos), "GET ANY BIG BARKS?", font_colour["title"], font=font["title"])
 
-    # Content
-    title_text = ["What you're Barking."]
-    #title_text = [username + ",", "Tweets Visualized."]
+    thresholds = [100, 500, 1000, 10000]
+    for i, threshold in enumerate(thresholds):
+        value = str(reaction_performance[threshold])
+        text = f"> {threshold} reactions."
+        
+        draw.text((x_pos, y_pos + spacer*(2 + i*1.5)), value, font_colour["number"], font=font["number"])
+        txt_width = font["text"].getsize(text)[0]
+        draw.text((1000 - x_pos - txt_width, y_pos + spacer*(2 + i*1.5)), text, font_colour["text"], font=font["text"])
+        
+        value_width = font["number"].getsize(value)[0]
+        draw.text((x_pos + value_width + 50, y_pos + spacer*(2 + i*1.5) + 15), "barks", font_colour["text"], font=font["text"])
 
-    # Draw title
-    # Since word cloud image is large, move text away from it
-    draw.text((x_pos-25, y_pos-25), title_text[0],
-              font_colour["title"], font=font["title"])
-    #draw.text((x_pos, y_pos + spacer), title_text[1], font_colour["title"], font = font["title"])
+    draw.text((650, 940), barkle_wrapped_watermark[0], font_colour["watermark"], font=font["watermark"])
 
-    # Draw watermark
-    draw.text((image_width - 350, image_height - 60),
-              tweet_wrapped_watermark[0], font_colour["title"], font=font["watermark"])
+    return img
 
-    # Save
-    img.save("img/outputs/word_clouds/" + username + ".png")
-    #print("Created word cloud image.")
-
-
-# Generate image 3
-def generate_likes_performance_image(username, likes_performance):
-
-    # Open black image
-    img = Image.open("img/templates/purple_1000x1000.png")
-    draw = ImageDraw.Draw(img)
-
-    # Template size
-    image_width, image_height = img.size
-
-    font = global_font
-    font_colour = global_font_colour
-
-    x_pos = global_text_pos["x"]
-    y_pos = global_text_pos["y"]
-    spacer = global_text_pos["spacer"]
-
-    lp_title_text = ["Get Any Big Barks?"]  # LP = 'likes performance'
-
-    lp_text = ["> 1 likes.", "> 5 likes.",
-               "> 15 likes.", "> 10,000 likes."]
-    lp_values = [str(likes_performance[100]), str(likes_performance[500]), str(
-        likes_performance[1000]), str(likes_performance[10000])]
-    lp_values_additional_text = ["barks"]
-
-    # Likes Performance section
-    # Right align
-    #title_width = font["title"].getsize(lp_title_text[0])[0]
-    #temp_x_pos = image_width - x_pos - title_width
-
-    # Width to right align
-    txt_width_0 = font["text"].getsize(lp_text[0])[0]
-    txt_width_1 = font["text"].getsize(lp_text[1])[0]
-    txt_width_2 = font["text"].getsize(lp_text[2])[0]
-    txt_width_3 = font["text"].getsize(lp_text[3])[0]
-
-    # Move base-level y-pos down
-    # not relevant with 4 images, so ignore for now
-    #y_pos = image_height/1.8
-
-    # Draw title
-    # Right-align not used currently
-    # use temp_x_pos for right-align
-    draw.text((x_pos, y_pos),
-              lp_title_text[0], font_colour["title"], font=font["title"])
-
-    # Draw lp text
-    temp_x_pos = image_width - x_pos - txt_width_0
-    draw.text((temp_x_pos, y_pos + spacer*1.8),
-              lp_text[0], font_colour["text"], font=font["text"])
-
-    temp_x_pos = image_width - x_pos - txt_width_1
-    draw.text((temp_x_pos, y_pos + spacer*3.3),
-              lp_text[1], font_colour["text"], font=font["text"])
-
-    temp_x_pos = image_width - x_pos - txt_width_2
-    draw.text((temp_x_pos, y_pos + spacer*4.8),
-              lp_text[2], font_colour["text"], font=font["text"])
-
-    temp_x_pos = image_width - x_pos - txt_width_3
-    draw.text((temp_x_pos, y_pos + spacer*6.3),
-              lp_text[3], font_colour["text"], font=font["text"])
-
-    # Draw lp values
-    draw.text((x_pos, y_pos + spacer*1.75),
-              lp_values[0], font_colour["number"], font=font["number"])
-    draw.text((x_pos, y_pos + spacer*3.25),
-              lp_values[1], font_colour["number"], font=font["number"])
-    draw.text((x_pos, y_pos + spacer*4.75),
-              lp_values[2], font_colour["number"], font=font["number"])
-    draw.text((x_pos, y_pos + spacer*6.25),
-              lp_values[3], font_colour["number"], font=font["number"])
-
-    # Draw additional text 'twitter' next to lp values
-    value_width_1 = font["title"].getsize(lp_values[0])[0]
-    value_width_2 = font["title"].getsize(lp_values[1])[0]
-    value_width_3 = font["title"].getsize(lp_values[2])[0]
-    value_width_4 = font["title"].getsize(lp_values[3])[0]
-    draw.text((value_width_1 + x_pos + 50, y_pos + spacer*1.8),
-              lp_values_additional_text[0], font_colour["text"], font=font["text"])
-    draw.text((value_width_2 + x_pos + 50, y_pos + spacer*3.3),
-              lp_values_additional_text[0], font_colour["text"], font=font["text"])
-    draw.text((value_width_3 + x_pos + 50, y_pos + spacer*4.8),
-              lp_values_additional_text[0], font_colour["text"], font=font["text"])
-    draw.text((value_width_4 + x_pos + 50, y_pos + spacer*6.3),
-              lp_values_additional_text[0], font_colour["text"], font=font["text"])
-
-    # Draw watermark
-    draw.text((image_width - 350, image_height - 60),
-              tweet_wrapped_watermark[0], font_colour["title"], font=font["watermark"])
-
-    # Save image
-    img.save("img/outputs/likes_performance/" +
-             username + ".png")
-    #print("Created likes performance image.")
-
-
-# Generate image 4
+# Generate image 4: Sentiment analysis
 def generate_sentiment_analysis_image(username, sentiment):
-
-    # Open black image
-    img = Image.open("img/templates/purple_1000x1000.png")
+    img = Image.new('RGB', (1000, 1000), color=BACKGROUND_COLOR)
     draw = ImageDraw.Draw(img)
-
-    # Template size
-    image_width, image_height = img.size
 
     font = global_font
     font_colour = global_font_colour
+    x_pos, y_pos, spacer = global_text_pos.values()
 
-    x_pos = global_text_pos["x"]
-    y_pos = global_text_pos["y"]
-    spacer = global_text_pos["spacer"]
+    draw.text((x_pos, y_pos), "HOW WERE YOU FEELING?", font_colour["title"], font=font["title"])
+    draw.text((x_pos, y_pos + spacer*1.1), "HAPPY OR SAD?", font_colour["title"], font=font["title"])
 
-    # Classify based on numerical sentiment value (-100 to 100)
-    if sentiment > 10:
-        sentiment_class = "SUPER HAPPY!"  # EMOJI
-        sentiment_emoji = Image.open(
-            "img/emojis/grinning-face-with-sweat_1f605.png")
-    elif sentiment > 5:
-        sentiment_class = "HAPPY!"
-        sentiment_emoji = Image.open(
-            "img/emojis/beaming-face-with-smiling-eyes_1f601.png")
-    elif sentiment > 0:
-        sentiment_class = "KINDA HAPPY..."  # EMOJI
-        sentiment_emoji = Image.open(
-            "img/emojis/emoji-upside-down-face_1f643.png")
-    elif sentiment > -5:
-        sentiment_class = "SAD!"
-        sentiment_emoji = Image.open(
-            "img/emojis/face-with-head-bandage_1f915.png")
+    draw.text((x_pos, y_pos + spacer*3), "Emotionally your barks", font_colour["text"], font=font["text"])
+    draw.text((x_pos, y_pos + spacer*4.25), "scored", font_colour["text"], font=font["text"])
+    
+    score_width = font["text"].getsize("scored")[0]
+    draw.text((x_pos + score_width + 25, y_pos + spacer*4.2), f"{sentiment}", font_colour["number"], font=font["number"])
+    
+    sentiment_value = float(sentiment)
+    if sentiment_value > 10:
+        mood = "SUPER HAPPY!"
+        emoji = Image.open("img/emojis/grinning-face-with-sweat_1f605.png")
+    elif sentiment_value > 5:
+        mood = "HAPPY!"
+        emoji = Image.open("img/emojis/beaming-face-with-smiling-eyes_1f601.png")
+    elif sentiment_value > 0:
+        mood = "KINDA HAPPY..."
+        emoji = Image.open("img/emojis/emoji-upside-down-face_1f643.png")
+    elif sentiment_value > -5:
+        mood = "SAD!"
+        emoji = Image.open("img/emojis/face-with-head-bandage_1f915.png")
     else:
-        sentiment_class = "DOWN BAD!"
-        sentiment_emoji = Image.open("img\emojis\sleepy-face_1f62a.png")
+        mood = "DOWN BAD!"
+        emoji = Image.open("img/emojis/sleepy-face_1f62a.png")
 
-    # Resize emoji
-    (emoji_width, emoji_height) = (
-        sentiment_emoji.width/2, sentiment_emoji.height/2)
-    sentiment_emoji = sentiment_emoji.resize(
-        (int(emoji_width), int(emoji_height)))
+    draw.text((x_pos, y_pos + spacer*5.5), "meaning you", font_colour["text"], font=font["text"])
+    draw.text((x_pos, y_pos + spacer*6.5), "were...", font_colour["text"], font=font["text"])
+    draw.text((x_pos + 200, y_pos + spacer*6.5), mood, font_colour["number"], font=font["number"])
 
-    # Sentiment title
-    sentiment_title = ["How were you feeling?", "Happy or Sad?"]
+    emoji = emoji.resize((int(emoji.width/2), int(emoji.height/2)))
+    img.paste(emoji, (x_pos, int(y_pos + spacer*7.5)), emoji)
 
-    # Sentiment text
-    sentiment_text = ["Emotionally  your  barks", "scored", str(
-        sentiment), "meaning  you", "were...", sentiment_class]
+    draw.text((650, 940), barkle_wrapped_watermark[0], font_colour["watermark"], font=font["watermark"])
 
-    # Move base-level y-pos down
-    # not relevant for 4 images, so ignore
-    # y_pos = image_height/1.5
+    return img
 
-    # Draw sentiment title
-    # Not using right-align
-    # use temp_x_pos for right-align
-    #title_width = font["title"].getsize(sentiment_title[0])[0]
-    #temp_x_pos = image_width - x_pos - title_width
-    draw.text((x_pos, y_pos),
-              sentiment_title[0], font_colour["title"], font=font["title"])
-    draw.text((x_pos, y_pos + spacer*1.1),
-              sentiment_title[1], font_colour["title"], font=font["title"])
+# Upload image to Barkle drive
+def upload_image_to_drive(image, filename):
+    endpoint = f"{BARKLE_API_URL}/drive/files/create"
+    
+    img_byte_arr = io.BytesIO()
+    image.save(img_byte_arr, format='PNG')
+    img_byte_arr = img_byte_arr.getvalue()
 
-    # Item 1
-    # Draw text 1
-    draw.text((x_pos, y_pos + spacer * 3),
-              sentiment_text[0], font_colour["text"], font=font["text"])
+    files = {
+        'file': (filename, img_byte_arr, 'image/png')
+    }
+    data = {
+        'force': 'true'
+    }
+    
+    response = requests.post(endpoint, headers=headers, files=files, data=data)
+    return response.json()['id']
 
-    # Item 2
-    # Draw text 2
-    draw.text((x_pos, y_pos + spacer * 4.25),
-              sentiment_text[1], font_colour["text"], font=font["text"])
-
-    # Item 3
-    # Draw sentiment value
-    # Get width of text to prevent overlap
-    txtwrap_x_pos = font["text"].getsize(sentiment_text[1])[0] + x_pos + 25
-    draw.text((txtwrap_x_pos, y_pos + spacer * 4.2),
-              sentiment_text[2], font_colour["number"], font=font["number"])
-
-    # Item 4
-    # Draw text 4
-    # Move text to be positioned after value number
-    txtwrap_x_pos = font["number"].getsize(sentiment_text[2])[
-        0] + txtwrap_x_pos + 25
-    draw.text((txtwrap_x_pos, y_pos + spacer * 4.25),
-              sentiment_text[3], font_colour["text"], font=font["text"])
-
-    # Item 5
-    # Draw text 5
-    draw.text((x_pos, y_pos + spacer * 5.5),
-              sentiment_text[4], font_colour["text"], font=font["text"])
-
-    # Item 6
-    # Draw sentiment class
-    temp_x_pos = font["text"].getsize(sentiment_text[4])[0] + x_pos + 25
-    draw.text((temp_x_pos, y_pos + spacer * 5.5),
-              sentiment_text[5], font_colour["number"], font=font["number"])
-
-    # If sentiment class is too long, draw emoji on new line
-    # e.g 'SUPER HAPPY!' is too long
-    if sentiment_class == "SUPER HAPPY!" or sentiment_class == "KINDA HAPPY...":
-        # Draw sentiment emoji on new line
-        img.paste(sentiment_emoji, (x_pos, int(y_pos + spacer * 6.8)))
-    else:
-        # Draw sentiment emoji after sentiment class
-        txtwrap_x_pos = font["number"].getsize(sentiment_text[5])[
-            0] + temp_x_pos + 25
-        img.paste(sentiment_emoji, (txtwrap_x_pos, int(y_pos + spacer * 5.5)))
-
-    # Draw watermark
-    draw.text((image_width - 350, image_height - 60),
-              tweet_wrapped_watermark[0], font_colour["title"], font=font["watermark"])
-
-    # Save
-    img.save("img/outputs/sentiment_analysis/" + username + ".png")
-    #print("Created sentiment analysis image.")
-
-
-# Test image gen without calling api
-#if __name__ == "__main__":
-#      # main(sys.argv[1])
-#    username = "FinessTV"
-#    most_likes = 5
-#    most_retweets = 10
-#    most_quotes = 2
-#      likes_performance = {
-#          100: 19,
-#          500: 3,
-#          1000: 0,
-#          10000: 0
-#      }
-#      sentiment = 11
-#      generate_highest_metrics_image(username, most_likes, most_retweets, most_quotes)
-#      generate_word_cloud_image(username)
-#      generate_likes_performance_image(username, likes_performance)
-#      generate_sentiment_analysis_image(username, sentiment)
-
-
-# Main method called by stream_mentions.py
-def main(username):
-
-    # Get user info, such as id
+# Main function to generate Barkle Wrapped
+def generate_barkle_wrapped(username):
     user = getUserInfo(username)
-    # Get tweets of user by id
-    try:
-        user_tweets = getUserRecentTweets(user.id)
-    except Exception as e:
-        print(e)
-        return False
+    user_barks = getUserYearlyBarks(user['id'])
 
-    # If user has already been processed, i.e. already used bot...
-    # storeUserTweets will return false, and program will stop...
-    # else, continue
-    if storeUserTweets(username, user_tweets):
+    if storeUserBarks(username, user_barks):
+        df = barksToDataFrame(user_barks)
+        df['sentiment'] = np.array([analyse_sentiment(bark) for bark in df['text']])
 
-        # Get user stats
-        df = tweetsToDataFrame(user_tweets.data)
-
-        # Carry out sentiment analysis
-        df['sentiment'] = np.array([analyse_sentiment(tweet)
-                                    for tweet in df['tweets']])
-
-        # Get average sentiment of all user tweets
-        sentiment = np.average(df['sentiment']) * 100
-        # Remove repeating demial e.g. 12.11111...
+        sentiment = np.mean(df['sentiment']) * 100
         sentiment = float("{0:.2f}".format(sentiment))
 
-        # pd.set_option('display.max_rows', 100) # Change how many rows df prints
-        # print(df.head(100))  # Print dataframe
+        most_reactions = np.max(df['reactionCount'])
+        most_rebarks = np.max(df['renoteCount'])
+        most_replies = np.max(df['repliesCount'])
 
-        # print(dir(user_tweets.data)) # What attributes exist
-        # print(user_tweets.data[0].public_metrics)
-
-        # Get highest metrics
-        most_likes = np.max(df['like_count'])
-        most_retweets = np.max(df['retweet_count'])
-        most_quotes = np.max(df['quote_count'])
-
-        # How many tweets with more than X likes
-        likes_performance = {
-            100: len(df[df['like_count'] > 1]),
-            # 500 likes metric only used in 4 image format
-            500: len(df[df['like_count'] > 5]),
-            1000: len(df[df['like_count'] > 15]),
-            10000: len(df[df['like_count'] > 10000])
+        reaction_performance = {
+            100: len(df[df['reactionCount'] > 100]),
+            500: len(df[df['reactionCount'] > 500]),
+            1000: len(df[df['reactionCount'] > 1000]),
+            10000: len(df[df['reactionCount'] > 10000])
         }
 
-        # Old 2 image format #
-        # generate_highest_metrics_and_likes_performance_image(username,
-        #                                                      most_likes,
-        #                                                      most_retweets,
-        #                                                      most_quotes,
-        #                                                      likes_performance)
+        all_text = ' '.join(df['text'])
 
-        # generate_word_clouds_and_sentiment_analysis_image(username, sentiment)
+        images = [
+            generate_highest_metrics_image(username, most_reactions, most_rebarks, most_replies),
+            generate_word_cloud_image(username, all_text),
+            generate_reaction_performance_image(username, reaction_performance),
+            generate_sentiment_analysis_image(username, sentiment)
+        ]
 
-        # New 4 image format #
+        drive_ids = []
+        for i, image in enumerate(images):
+            filename = f"{username}_barkle_wrapped_{i+1}.png"
+            drive_id = upload_image_to_drive(image, filename)
+            drive_ids.append(drive_id)
 
-        # Generate image 1 - Highest metrics
-        generate_highest_metrics_image(
-            username, most_likes, most_retweets, most_quotes)
-
-        # Generate image 2 - Word cloud
-        generate_word_cloud_image(username)
-
-        # Generate image 3 - Likes performance
-        generate_likes_performance_image(username, likes_performance)
-
-        # Generate image 4 - Sentiment analysis
-        generate_sentiment_analysis_image(username, sentiment)
-
-        return True
-
+        return drive_ids
     else:
-        return False
+        return None
+
+# Function to reply to mention with generated images
+def reply_to_mention(bark_id, username, drive_ids):
+    endpoint = f"{BARKLE_API_URL}/notes/create"
+    data = {
+        "replyId": bark_id,
+        "text": f"Hey @{username}, here's your Barkle Wrapped for the year! Check out these four images summarizing your year on Barkle.",
+        "fileIds": drive_ids
+    }
+    response = requests.post(endpoint, headers=headers, json=data)
+    if response.status_code == 200:
+        logger.info(f"Successfully replied to {username} with Barkle Wrapped")
+    else:
+        logger.error(f"Failed to reply to {username}. Status code: {response.status_code}")
+
+# WebSocket connection handler
+def on_message(ws, message):
+    data = json.loads(message)
+    if data['type'] == 'mention':
+        note = data['body']
+        if note['user']['username'] != BOT_USERNAME:  # Avoid self-mentions
+            text = note['text'].lower()
+            if 'wrapped' in text and f'@{BOT_USERNAME.lower()}' in text:
+                logger.info(f"Received wrapped request from @{note['user']['username']}")
+                username = note['user']['username']
+                drive_ids = generate_barkle_wrapped(username)
+                if drive_ids:
+                    reply_to_mention(note['id'], username, drive_ids)
+
+def on_error(ws, error):
+    logger.error(f"WebSocket error: {error}")
+
+def on_close(ws, close_status_code, close_msg):
+    logger.info("WebSocket connection closed")
+
+def on_open(ws):
+    logger.info("WebSocket connection opened")
+    auth_message = json.dumps({
+        "type": "connect",
+        "body": {
+            "channel": "main",
+            "id": "1"
+        }
+    })
+    ws.send(auth_message)
+
+# Main function to run the bot
+def run_bot():
+    websocket.enableTrace(True)
+    ws = websocket.WebSocketApp(BARKLE_WS_URL,
+                                on_open=on_open,
+                                on_message=on_message,
+                                on_error=on_error,
+                                on_close=on_close)
+
+    while True:
+        try:
+            ws.run_forever()
+        except Exception as e:
+            logger.error(f"WebSocket connection failed: {e}")
+            logger.info("Attempting to reconnect in 10 seconds...")
+            time.sleep(10)
+
+if __name__ == "__main__":
+    run_bot()
